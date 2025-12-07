@@ -1,20 +1,28 @@
 import sys
 import re
-from pathlib import Path
-
 import json
 import math
 import numpy as np
 import traceback
 from collections import deque
+from pathlib import Path
+from typing import Any
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
-from typing import Any
 
+from sklearn.decomposition import PCA
+
+# --- IMPORTY FROUROS (STREAMING) ---
+# 1. Concept Drift (ADWIN - klasyk)
 from frouros.detectors.concept_drift import ADWIN, ADWINConfig
-from frouros.detectors.data_drift.batch.distance_based import MMD, EnergyDistance
-from scipy.stats import ks_2samp
+
+# 2. Data Drift Streaming - MMD (Multivariate)
+from frouros.detectors.data_drift.streaming.distance_based import MMD as MMDStreaming
+
+# 3. Data Drift Streaming - Incremental KS (Univariate)
+from frouros.detectors.data_drift.streaming.statistical_test import IncrementalKSTest
 
 # ==========================================
 # KONFIGURACJA
@@ -22,14 +30,18 @@ from scipy.stats import ks_2samp
 FILE_PATH = "./yelp_sudden_embed/yelp_sudden_embed.json"
 ANOMALY_MODEL_NAME = "svm"
 
+MMD_CHECK_INTERVAL = 10  # Uruchamiaj MMD tylko co 10 recenzji (10x przyspieszenie)
+PCA_COMPONENTS = 32  # Redukcja embeddingu z 384 do 32 wymiarów dla MMD
+STREAM_WINDOW_SIZE = 200  # Mniejsze okno = szybsze MMD
+
 WARMUP_TRAIN = 200  # Próbki do trenowania modelu
-WARMUP_REF = 200  # Próbki referencyjne (Hold-out dla testów statystycznych)
+WARMUP_REF = 200  # Próbki referencyjne (Baza dla KS i MMD)
 WARMUP_TOTAL = WARMUP_TRAIN + WARMUP_REF
 
-TEST_WINDOW_SIZE = 300
-CHECK_INTERVAL = 50
+# W streamingu to oznacza: "Porównuj ostatnie 300 próbek strumienia z bazą referencyjną"
+STREAM_WINDOW_SIZE = 300
 ADWIN_DELTA = 0.002
-EMBEDDING_DIM = 384  # Oczekiwany wymiar embeddingów
+EMBEDDING_DIM = 384  # Wymiar embeddingu
 
 
 def is_valid_path(path_string: str) -> bool:
@@ -86,7 +98,7 @@ def process_stream(file_path: str):
             try:
                 data = json.loads(line)
                 yield (
-                    np.array(data["embedding"], dtype=np.float64),  # Wymuszamy float64
+                    np.array(data["embedding"], dtype=np.float64),
                     data.get("date", "N/A"),
                     data.get("text", ""),
                 )
@@ -96,26 +108,27 @@ def process_stream(file_path: str):
 
 def main():
     scaler = StandardScaler()
+    # PCA tylko dla MMD (nie wpływa na SVM/ADWIN/KS)
+    pca_reducer = PCA(n_components=PCA_COMPONENTS)
 
-    adwin_config = ADWINConfig(delta=ADWIN_DELTA)
-    adwin = ADWIN(config=adwin_config)
+    # 1. ADWIN (Concept Drift - Zmiana średniej)
+    adwin = ADWIN(config=ADWINConfig(delta=ADWIN_DELTA))
 
-    # energy_dist = EnergyDistance()
-    # mmd = MMD()
+    # 2. Incremental KS Test (Data Drift - Zmiana rozkładu wyników 1D)
+    # Porównuje histogram referencyjny z oknem przesuwnym ze strumienia
+    ks_stream = IncrementalKSTest(window_size=STREAM_WINDOW_SIZE)
+
+    # 3. Streaming MMD (Data Drift - Zmiana rozkładu embeddingów ND)
+    # Porównuje kernel distance referencji z oknem przesuwnym
+    mmd_stream = MMDStreaming(window_size=STREAM_WINDOW_SIZE)
 
     # Bufory
     step = 0
-    warmup_buffer = []  # Tu zbieramy wszystko na start
-
-    # Przechowywanie danych referencyjnych
-    X_ref_raw = None  # Surowe embeddingi (dla MMD/Energy)
-    scores_ref = None  # Wyniki modelu (dla KS)
-
-    # Okna przesuwne (Queue)
-    current_window_emb = deque(maxlen=TEST_WINDOW_SIZE)
-    current_window_scores = deque(maxlen=TEST_WINDOW_SIZE)
-
+    warmup_buffer = []
     model_trained = False
+
+    # Przechowywanie zredukowanych danych ref
+    X_ref_pca = None
 
     # MODEL BAZOWY
     model = None
@@ -134,16 +147,15 @@ def main():
         return
 
     print(f"🚀 Start detekcji. Model: {ANOMALY_MODEL_NAME.upper()}")
-    print(
-        f"   Warmup Total: {WARMUP_TOTAL} (Train: {WARMUP_TRAIN} | Ref: {WARMUP_REF})"
-    )
+    print(f"   Mode: FULL STREAMING")
+    print(f"   Detectors: ADWIN, IncrementalKSTest, StreamingMMD")
 
     try:
         for embedding, date_str, text in process_stream(str(FILE_PATH)):
             step += 1
 
             # ==========================================
-            # FAZA 1: WARMUP (Zbieranie i Podział)
+            # FAZA 1: WARMUP (Zbieranie i Fit)
             # ==========================================
             if not model_trained:
                 warmup_buffer.append(embedding)
@@ -152,34 +164,39 @@ def main():
                         f"\n🔧 Warmup zakończony. Przetwarzanie {WARMUP_TOTAL} próbek..."
                     )
 
-                    X_all = np.array(warmup_buffer)  # Shape: (400, 384)
-
-                    # Podział na Train i Reference
+                    X_all = np.array(warmup_buffer, dtype=np.float64)
                     X_train = X_all[:WARMUP_TRAIN]
-                    X_ref_raw = X_all[WARMUP_TRAIN:]  # Surowe embeddingi dla MMD/Energy
+                    X_ref_raw = X_all[WARMUP_TRAIN:]
 
-                    # 1. Trenujemy Scaler i Model na X_train
-                    print(f"   Trening modelu na {len(X_train)} próbkach...")
+                    # 1. Trenujemy Model Anomalii (na pełnych wymiarach)
+                    print(f"   Trening modelu anomalii...")
                     scaler.fit(X_train)
                     X_train_scaled = scaler.transform(X_train)
                     model.fit(X_train_scaled)
 
-                    # 2. Generujemy wyniki referencyjne na X_ref (Hold-out)
-                    print(
-                        f"   Generowanie Reference Score na {len(X_ref_raw)} próbkach..."
-                    )
+                    # 2. Reference Scores dla KS
                     X_ref_scaled = scaler.transform(X_ref_raw)
-
                     if ANOMALY_MODEL_NAME == "svm":
-                        raw_scores = model.score_samples(X_ref_scaled)
-                        scores_ref = [sigmoid(-s) for s in raw_scores]
+                        raw_s = model.score_samples(X_ref_scaled)
+                        scores_ref = [sigmoid(-s) for s in raw_s]
                     else:
-                        raw_scores = model.decision_function(X_ref_scaled)
-                        scores_ref = [sigmoid(-s * 10) for s in raw_scores]
+                        raw_s = model.decision_function(X_ref_scaled)
+                        scores_ref = [sigmoid(-s * 10) for s in raw_s]
+                    scores_ref = np.array(scores_ref, dtype=np.float64)
 
-                    scores_ref = np.array(scores_ref)
+                    # 3. FIT PCA I MMD (Optymalizacja)
+                    print(f"   Trening PCA (384 -> {PCA_COMPONENTS})...")
+                    # Uczymy PCA na danych referencyjnych, by "zrozumiał" normalną strukturę
+                    pca_reducer.fit(X_ref_raw)
+                    X_ref_pca = pca_reducer.transform(X_ref_raw)
+
+                    # Fit detektorów
+                    print("   Fitowanie detektorów strumieniowych...")
+                    ks_stream.fit(X=scores_ref)
+                    mmd_stream.fit(X=X_ref_pca)  # MMD uczy się na zredukowanych danych!
+
                     model_trained = True
-                    warmup_buffer = []  # Czyścimy RAM
+                    warmup_buffer = []
                     print("✅ System gotowy. Przełączanie w tryb online.\n")
                 continue
 
@@ -187,8 +204,7 @@ def main():
             # FAZA 2: DETEKCJA ONLINE
             # ==========================================
 
-            # A. Scoring (Model Anomalii)
-            # Reshape jest kluczowy dla pojedynczej próbki (1, 384)
+            # A. Scoring
             X_sample = embedding.reshape(1, -1)
             X_sample_scaled = scaler.transform(X_sample)
 
@@ -199,101 +215,61 @@ def main():
                 raw = model.decision_function(X_sample_scaled)[0]
                 prob = sigmoid(-raw * 10)
 
-            # B. Aktualizacja Buforów
-            current_window_emb.append(embedding)
-            current_window_scores.append(prob)
-
-            # 2. ADWIN (Szybki dryf koncepcji)
+            # --- DETEKTOR 1: ADWIN (Concept Drift) ---
             adwin.update(value=prob)
             if adwin.drift:
-                print(f"🚨 [ADWIN] Drift w kroku {step}! (Prob: {prob:.4f})")
+                print(f"🚨 [ADWIN] Drift w kroku {step}! (Zmiana średniej anomalii)")
+                print(f"    -> Tekst: {text[:60]}...")
                 adwin.reset()
 
-            # D. Detekcja Batchowa (KS, MMD, Energy)
+            # --- DETEKTOR 2: Incremental KS (Data Drift 1D) ---
+            # Monitoruje rozkład wyników modelu (probability)
+            ks_result, _ = ks_stream.update(value=prob)
             if (
-                len(current_window_emb) == TEST_WINDOW_SIZE
-                and step % CHECK_INTERVAL == 0
+                ks_result is not None
+                and ks_result.p_value  # pyright: ignore[reportAttributeAccessIssue]
+                < 0.001
             ):
+                # Pobieramy p-value z obiektu testu
+                # Frouros przechowuje statystyki w callbacks lub logs, ale flaga .drift wystarczy
+                print(f"📉 [Inc-KS] Drift w kroku {step}! (Zmiana rozkładu wyników)")
+                print(f"    -> Tekst: {text[:60]}...")
+                ks_stream.reset()
+                ks_stream.fit(
+                    X=scores_ref  # pyright: ignore[reportPossiblyUnboundVariable]
+                )
 
-                # Przygotowanie danych bieżących
-                # Używamy .copy(), aby upewnić się, że pamięć jest ciągła (C-contiguous)
-                X_curr_raw = np.array(list(current_window_emb)).copy()
-                scores_curr = np.array(list(current_window_scores))
-
-                # Wymuszenie kształtu 2D (Bezpiecznik dla Frouros)
-                if X_curr_raw.ndim == 1:
-                    X_curr_raw = X_curr_raw.reshape(-1, EMBEDDING_DIM)
-                if X_ref_raw.ndim == 1:  # pyright: ignore[reportOptionalMemberAccess]
-                    X_ref_raw = X_ref_raw.reshape(  # pyright: ignore[reportOptionalMemberAccess]
-                        -1, EMBEDDING_DIM
-                    )
-
-                drift_reasons = []
-
-                # --- 1. KS TEST ---
-                # Porównujemy rozkład wyników modelu (Reference vs Current)
+            # --- DETEKTOR 3: Streaming MMD (Data Drift ND) ---
+            # Monitoruje surowe wektory embeddingów
+            if step % MMD_CHECK_INTERVAL == 0:
                 try:
-                    ks_res = ks_2samp(scores_ref, scores_curr)
-                    p_val = (
-                        ks_res.pvalue  # pyright: ignore[reportAttributeAccessIssue]
-                        if hasattr(ks_res, "pvalue")
-                        else ks_res[1]
+                    emb_pca = pca_reducer.transform(embedding.reshape(1, -1))
+                    # Flatten do 1D (wymóg niektórych wersji streaming MMD)
+                    emb_pca_flat = emb_pca.flatten()
+                    mmd_result, _ = mmd_stream.update(
+                        value=emb_pca_flat  # pyright: ignore[reportArgumentType]
                     )
-                    # Próg p < 0.001 (0.1%)
-                    if p_val < 0.001:  # pyright: ignore[reportOperatorIssue]
-                        drift_reasons.append(f"KS (p={p_val:.2e})")
+
+                    if (
+                        mmd_result is not None
+                        and mmd_result.distance  # pyright: ignore[reportAttributeAccessIssue]
+                        > 0.025
+                    ):
+                        print(
+                            f"🌌 [MMD] Drift w kroku {step}! (Zmiana geometrii embeddingów)"
+                        )
+                        print(f"    -> Tekst: {text[:60]}...")
+                        mmd_stream.reset()
+                        # MUSIMY UŻYĆ X_ref_pca (32 dim), NIE X_ref_raw (384 dim)
+                        mmd_stream.fit(
+                            X=X_ref_pca  # pyright: ignore[reportArgumentType]
+                        )
                 except Exception as e:
-                    print(f"⚠️ Błąd KS: {e}")
+                    # Zabezpieczenie przed rzadkimi błędami algebry liniowej w update
+                    print(f"⚠️ MMD Error: {e}")
+                    pass
 
-                # --- 2. MMD & ENERGY (Na surowych danych) ---
-                try:
-                    # Debug: Sprawdzenie kształtów przed wywołaniem
-                    # print(f"DEBUG: Ref Shape: {X_ref_raw.shape}, Curr Shape: {X_curr_raw.shape}")
-
-                    # Tworzymy nowe instancje (Stateless usage)
-                    detector_mmd = MMD()
-                    detector_mmd.fit(X=X_ref_raw)  # pyright: ignore[reportArgumentType]
-                    res_mmd = detector_mmd.compare(X=X_curr_raw)[0]
-
-                    # Obsługa różnych typów zwracanych
-                    val_mmd = (
-                        res_mmd.distance  # pyright: ignore[reportAttributeAccessIssue]
-                        if hasattr(res_mmd, "distance")
-                        else res_mmd
-                    )
-                    if isinstance(val_mmd, np.ndarray):
-                        val_mmd = val_mmd.item()
-
-                    if val_mmd > 0.025:
-                        drift_reasons.append(f"MMD (dist={val_mmd:.4f})")
-
-                    # Energy Distance
-                    detector_energy = EnergyDistance()
-                    detector_energy.fit(
-                        X=X_ref_raw  # pyright: ignore[reportArgumentType]
-                    )
-                    res_energy = detector_energy.compare(X=X_curr_raw)[0]
-
-                    val_energy = (
-                        res_energy.distance  # pyright: ignore[reportAttributeAccessIssue]
-                        if hasattr(res_energy, "distance")
-                        else res_energy
-                    )
-                    if isinstance(val_energy, np.ndarray):
-                        val_energy = val_energy.item()
-
-                    if val_energy > 0.05:
-                        drift_reasons.append(f"Energy (dist={val_energy:.4f})")
-
-                except Exception as e:
-                    print(f"⚠️ Błąd Frouros (Shape: {X_curr_raw.shape}): {e}")
-
-                if drift_reasons:
-                    print(
-                        f"⚠️  [BATCH DRIFT {step}] Wykryto: {', '.join(drift_reasons)}"
-                    )
-                    print(f"    -> Tekst: {text[:60]}...")
-
+            # Logowanie postępu
             if step % 1000 == 0:
                 print(f"Step {step} | {date_str} | Prob: {prob:.2f}")
 
