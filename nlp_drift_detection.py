@@ -16,19 +16,20 @@ from frouros.detectors.concept_drift import ADWIN, ADWINConfig
 from frouros.detectors.data_drift.batch.distance_based import MMD, EnergyDistance
 from scipy.stats import ks_2samp
 
+# ==========================================
 # KONFIGURACJA
-FILE_PATH = (
-    "./yelp_academic_dataset_review_embed/yelp_academic_dataset_review_embed.json"
-)
+# ==========================================
+FILE_PATH = "./yelp_sudden_embed/yelp_sudden_embed.json"
 ANOMALY_MODEL_NAME = "svm"
 
 WARMUP_TRAIN = 200  # Próbki do trenowania modelu
-WARMUP_REF = 200  # Próbki do zbudowania dystrybucji odniesienia (nie użyte w treningu!)
+WARMUP_REF = 200  # Próbki referencyjne (Hold-out dla testów statystycznych)
 WARMUP_TOTAL = WARMUP_TRAIN + WARMUP_REF
 
 TEST_WINDOW_SIZE = 300
 CHECK_INTERVAL = 50
 ADWIN_DELTA = 0.002
+EMBEDDING_DIM = 384  # Oczekiwany wymiar embeddingów
 
 
 def is_valid_path(path_string: str) -> bool:
@@ -106,11 +107,11 @@ def main():
     step = 0
     warmup_buffer = []  # Tu zbieramy wszystko na start
 
-    # Dane referencyjne (po warmupie)
-    X_ref_scaled = None
-    scores_ref = None
+    # Przechowywanie danych referencyjnych
+    X_ref_raw = None  # Surowe embeddingi (dla MMD/Energy)
+    scores_ref = None  # Wyniki modelu (dla KS)
 
-    # Dane bieżące
+    # Okna przesuwne (Queue)
     current_window_emb = deque(maxlen=TEST_WINDOW_SIZE)
     current_window_scores = deque(maxlen=TEST_WINDOW_SIZE)
 
@@ -130,6 +131,8 @@ def main():
     else:
         print(f"Error, unknown model: {ANOMALY_MODEL_NAME}")
         sys.exit(1)
+        return
+
     print(f"🚀 Start detekcji. Model: {ANOMALY_MODEL_NAME.upper()}")
     print(
         f"   Warmup Total: {WARMUP_TOTAL} (Train: {WARMUP_TRAIN} | Ref: {WARMUP_REF})"
@@ -144,43 +147,39 @@ def main():
             # ==========================================
             if not model_trained:
                 warmup_buffer.append(embedding)
-
                 if len(warmup_buffer) >= WARMUP_TOTAL:
-                    print(f"\n🔧 Warmup zakończony. Dzielenie danych...")
+                    print(
+                        f"\n🔧 Warmup zakończony. Przetwarzanie {WARMUP_TOTAL} próbek..."
+                    )
 
-                    # Konwersja na numpy
-                    X_all = np.array(warmup_buffer)
+                    X_all = np.array(warmup_buffer)  # Shape: (400, 384)
 
-                    # PODZIAŁ: Train Set vs Reference Set
-                    # Unikamy błędu "Train vs Test Bias" w KS Test
+                    # Podział na Train i Reference
                     X_train = X_all[:WARMUP_TRAIN]
-                    X_ref = X_all[WARMUP_TRAIN:]  # Te dane nie widziały modelu w .fit()
+                    X_ref_raw = X_all[WARMUP_TRAIN:]  # Surowe embeddingi dla MMD/Energy
 
-                    print(f"   Trening Scalera i Modelu na {len(X_train)} próbkach...")
+                    # 1. Trenujemy Scaler i Model na X_train
+                    print(f"   Trening modelu na {len(X_train)} próbkach...")
                     scaler.fit(X_train)
                     X_train_scaled = scaler.transform(X_train)
                     model.fit(X_train_scaled)
 
+                    # 2. Generujemy wyniki referencyjne na X_ref (Hold-out)
                     print(
-                        f"   Generowanie Reference Score na {len(X_ref)} próbkach (Hold-out)..."
+                        f"   Generowanie Reference Score na {len(X_ref_raw)} próbkach..."
                     )
-                    # Przygotowanie referencji dla detektorów
-                    # Używamy ascontiguousarray, aby naprawić błędy pamięci w Frouros
-                    X_ref_scaled = np.ascontiguousarray(scaler.transform(X_ref))
+                    X_ref_scaled = scaler.transform(X_ref_raw)
 
                     if ANOMALY_MODEL_NAME == "svm":
-                        raw_ref = model.score_samples(X_ref_scaled)
-                        scores_ref = [sigmoid(-s) for s in raw_ref]
+                        raw_scores = model.score_samples(X_ref_scaled)
+                        scores_ref = [sigmoid(-s) for s in raw_scores]
                     else:
-                        raw_ref = model.decision_function(X_ref_scaled)
-                        scores_ref = [
-                            sigmoid(-s * 10) for s in raw_ref
-                        ]  # Skalowanie dla iForest
+                        raw_scores = model.decision_function(X_ref_scaled)
+                        scores_ref = [sigmoid(-s * 10) for s in raw_scores]
 
                     scores_ref = np.array(scores_ref)
                     model_trained = True
-                    # Czyścimy bufor, żeby zwolnić pamięć
-                    warmup_buffer = []
+                    warmup_buffer = []  # Czyścimy RAM
                     print("✅ System gotowy. Przełączanie w tryb online.\n")
                 continue
 
@@ -188,19 +187,19 @@ def main():
             # FAZA 2: DETEKCJA ONLINE
             # ==========================================
 
-            # 1. Przetwarzanie próbki
+            # A. Scoring (Model Anomalii)
+            # Reshape jest kluczowy dla pojedynczej próbki (1, 384)
             X_sample = embedding.reshape(1, -1)
-            X_scaled = scaler.transform(X_sample)
+            X_sample_scaled = scaler.transform(X_sample)
 
-            # Scoring
             if ANOMALY_MODEL_NAME == "svm":
-                raw = model.score_samples(X_scaled)[0]
+                raw = model.score_samples(X_sample_scaled)[0]
                 prob = sigmoid(-raw)
             else:
-                raw = model.decision_function(X_scaled)[0]
+                raw = model.decision_function(X_sample_scaled)[0]
                 prob = sigmoid(-raw * 10)
 
-            # Aktualizacja okien
+            # B. Aktualizacja Buforów
             current_window_emb.append(embedding)
             current_window_scores.append(prob)
 
@@ -210,57 +209,84 @@ def main():
                 print(f"🚨 [ADWIN] Drift w kroku {step}! (Prob: {prob:.4f})")
                 adwin.reset()
 
-            # 3. TESTY STATYSTYCZNE (Batch)
+            # D. Detekcja Batchowa (KS, MMD, Energy)
             if (
                 len(current_window_emb) == TEST_WINDOW_SIZE
                 and step % CHECK_INTERVAL == 0
             ):
 
                 # Przygotowanie danych bieżących
-                X_curr = np.array(current_window_emb)
-                X_curr_scaled = np.ascontiguousarray(scaler.transform(X_curr))
-                scores_curr = np.array(current_window_scores)
+                # Używamy .copy(), aby upewnić się, że pamięć jest ciągła (C-contiguous)
+                X_curr_raw = np.array(list(current_window_emb)).copy()
+                scores_curr = np.array(list(current_window_scores))
+
+                # Wymuszenie kształtu 2D (Bezpiecznik dla Frouros)
+                if X_curr_raw.ndim == 1:
+                    X_curr_raw = X_curr_raw.reshape(-1, EMBEDDING_DIM)
+                if X_ref_raw.ndim == 1:  # pyright: ignore[reportOptionalMemberAccess]
+                    X_ref_raw = X_ref_raw.reshape(  # pyright: ignore[reportOptionalMemberAccess]
+                        -1, EMBEDDING_DIM
+                    )
 
                 drift_reasons = []
 
-                # A. KS Test (Porównanie rozkładu wyników modelu)
-                # Teraz porównujemy Ref (Out-of-sample) vs Curr (Out-of-sample)
-                # To powinno dać realne p-value, a nie 1e-20.
-                ks_res = ks_2samp(scores_ref, scores_curr)
-                p_val = ks_res.pvalue if hasattr(ks_res, "pvalue") else ks_res[1]  # type: ignore
-
-                # Bardzo niski próg dla KS
-                if p_val < 0.001:  # type: ignore
-                    drift_reasons.append(f"KS (p={p_val:.2e})")
-
-                # B. MMD & Energy (Porównanie surowych embeddingów)
-                # Tworzymy NOWE instancje detektorów, aby uniknąć błędów stanu/wymiarów
+                # --- 1. KS TEST ---
+                # Porównujemy rozkład wyników modelu (Reference vs Current)
                 try:
-                    # MMD
-                    detector_mmd = MMD()
-                    detector_mmd.fit(X=X_ref_scaled)  # type: ignore
-                    res_mmd = detector_mmd.compare(X=X_curr_scaled)[0]
-                    dist_mmd = (
-                        res_mmd.distance if hasattr(res_mmd, "distance") else res_mmd  # type: ignore
+                    ks_res = ks_2samp(scores_ref, scores_curr)
+                    p_val = (
+                        ks_res.pvalue  # pyright: ignore[reportAttributeAccessIssue]
+                        if hasattr(ks_res, "pvalue")
+                        else ks_res[1]
                     )
-                    if dist_mmd > 0.025:  # Lekko podniesiony próg
-                        drift_reasons.append(f"MMD (dist={dist_mmd:.4f})")
+                    # Próg p < 0.001 (0.1%)
+                    if p_val < 0.001:  # pyright: ignore[reportOperatorIssue]
+                        drift_reasons.append(f"KS (p={p_val:.2e})")
+                except Exception as e:
+                    print(f"⚠️ Błąd KS: {e}")
 
-                    # Energy
+                # --- 2. MMD & ENERGY (Na surowych danych) ---
+                try:
+                    # Debug: Sprawdzenie kształtów przed wywołaniem
+                    # print(f"DEBUG: Ref Shape: {X_ref_raw.shape}, Curr Shape: {X_curr_raw.shape}")
+
+                    # Tworzymy nowe instancje (Stateless usage)
+                    detector_mmd = MMD()
+                    detector_mmd.fit(X=X_ref_raw)  # pyright: ignore[reportArgumentType]
+                    res_mmd = detector_mmd.compare(X=X_curr_raw)[0]
+
+                    # Obsługa różnych typów zwracanych
+                    val_mmd = (
+                        res_mmd.distance  # pyright: ignore[reportAttributeAccessIssue]
+                        if hasattr(res_mmd, "distance")
+                        else res_mmd
+                    )
+                    if isinstance(val_mmd, np.ndarray):
+                        val_mmd = val_mmd.item()
+
+                    if val_mmd > 0.025:
+                        drift_reasons.append(f"MMD (dist={val_mmd:.4f})")
+
+                    # Energy Distance
                     detector_energy = EnergyDistance()
-                    detector_energy.fit(X=X_ref_scaled)  # type: ignore
-                    res_energy = detector_energy.compare(X=X_curr_scaled)[0]
-                    dist_energy = (
-                        res_energy.distance  # type: ignore
+                    detector_energy.fit(
+                        X=X_ref_raw  # pyright: ignore[reportArgumentType]
+                    )
+                    res_energy = detector_energy.compare(X=X_curr_raw)[0]
+
+                    val_energy = (
+                        res_energy.distance  # pyright: ignore[reportAttributeAccessIssue]
                         if hasattr(res_energy, "distance")
                         else res_energy
                     )
-                    if dist_energy > 0.05:
-                        drift_reasons.append(f"Energy (dist={dist_energy:.4f})")
+                    if isinstance(val_energy, np.ndarray):
+                        val_energy = val_energy.item()
+
+                    if val_energy > 0.05:
+                        drift_reasons.append(f"Energy (dist={val_energy:.4f})")
 
                 except Exception as e:
-                    # Wyłapujemy błędy Frouros, ale nie przerywamy skryptu
-                    print(f"⚠️  Błąd Frouros (wymiary/pamięć): {e}")
+                    print(f"⚠️ Błąd Frouros (Shape: {X_curr_raw.shape}): {e}")
 
                 if drift_reasons:
                     print(
