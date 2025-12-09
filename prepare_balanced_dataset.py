@@ -11,7 +11,7 @@ OUTPUT_PATH = ""
 CATEGORY_A = "Restaurants"
 CATEGORY_B = "Beauty & Spas"
 dataset_size = 20_000
-DRIFT_TYPE = "gradual"  # sudden, gradual or sudden_by_year
+DRIFT_TYPE = "gradual"  #sudden, gradual or sudden_by_year
 
 import argparse
 
@@ -95,17 +95,16 @@ class YelpDataPreparer:
         self.review_path = review_path
         self.business_path = business_path
         self.df_reviews = self.load_reviews(0, self.file_index)
-        print(f"Wczytano {len(self.df_reviews)} recenzji")
+        print(f"Reviews: {len(self.df_reviews)}")
         self.df_business = self.load_business()
-        print(f"Wczytano {len(self.df_business)} biznesów")
+        print(f"Businesses: {len(self.df_business)}")
         self.df_merged = self.merge_reviews_with_business()
-        print(f"Połączono do {len(self.df_merged)} rekordów")
+        print(f"Records total: {len(self.df_merged)}")
 
     def load_reviews(self, start : int, end : int):
-        """
-        Wczytuje plik review.json do DataFrame.
-        Konwertuje kolumnę 'date' na datetime.
-        """
+        #Read review.json into DataFrame
+        #Convert 'date' -> datetime
+
         batch = []
         with open(self.review_path, "r", encoding="utf-8") as f:
             for i, line in enumerate(f):
@@ -119,19 +118,15 @@ class YelpDataPreparer:
         return df
 
     def load_business(self, nrows=None):
-        """
-        Wczytuje plik business.json do DataFrame.
-        Zwraca tylko kolumny business_id, categories, city.
-        """
+        #Read business.json into DataFrame
+        #returns columns: business_id, categories, city
+
         df = pd.read_json(self.business_path, lines=True, nrows=nrows)
         self.df_business = df[["business_id", "categories", "city"]]
         return self.df_business
     
     def merge_reviews_with_business(self):
-        """
-        Łączy review.json z business.json po business_id.
-        Wymaga wcześniejszego uruchomienia load_reviews() i load_business().
-        """
+        #Combine review.json with business.json by business_id
 
         if self.df_reviews is None:
             raise ValueError("No review data loaded")
@@ -150,16 +145,9 @@ class YelpDataPreparer:
         return self.df_merged
 
     def filter_by_year_and_category(self, year: int, category: str):
-        """
-        Zwraca rekordy, które:
-        - mają w polu 'date' podany rok,
-        - mają w 'categories' daną kategorię (case-insensitive).
-
-        Wymaga wcześniejszego wykonania merge_reviews_with_business().
-        """
 
         if self.df_merged is None:
-            raise ValueError("Najpierw wywołaj merge_reviews_with_business()")
+            raise ValueError("Missing: merge_reviews_with_business()")
 
         df = self.df_merged
 
@@ -175,22 +163,15 @@ class YelpDataPreparer:
         out = {}
         for k, v in rec.items():
             if isinstance(v, pd.Timestamp):
-                out[k] = v.isoformat()  # <-- najważniejsze
+                out[k] = v.isoformat()  #najważniejsze
             else:
                 out[k] = v
         return out
 
     def filter_by_category(self, category: str):
-        """
-        Zwraca rekordy, które:
-        - mają w polu 'date' podany rok,
-        - mają w 'categories' daną kategorię (case-insensitive).
-
-        Wymaga wcześniejszego wykonania merge_reviews_with_business().
-        """
 
         if self.df_merged is None:
-            raise ValueError("Najpierw wywołaj merge_reviews_with_business()")
+            raise ValueError("Missing: merge_reviews_with_business()")
 
         df = self.df_merged
 
@@ -202,38 +183,35 @@ class YelpDataPreparer:
         return result
     
     def create_sudden_drift_data(self, dataset_size=dataset_size, output_path=OUTPUT_PATH):
-        """
-        Tworzy dane typu sudden drift:
-        najpierw dataset_size próbek CATEGORY_A,
-        potem dataset_size próbek CATEGORY_B.
-
-        Dane są zapisywane jako JSONL do output_path.
-        """
+        #Tworzy dane typu sudden drift:
+        #najpierw dataset_size próbek CATEGORY_A,
+        #potem dataset_size próbek CATEGORY_B.
+        #Dane są zapisywane jako JSONL do output_path.
 
         collected_A = []
         collected_B = []
 
         batch_size = 100_000 
 
-        print("=== Tworzenie sudden drift dataset ===")
+        print("Sudden drift dataset")
 
         while self.file_index < 30_000_000:
 
-            print(f"\nWczytywanie batchu od {self.file_index} do {self.file_index + batch_size}")
+            print(f"\nBatch {self.file_index} - {self.file_index + batch_size}")
 
             
             self.df_reviews = self.load_reviews(self.file_index, self.file_index + batch_size)
             self.file_index += batch_size
 
-            print(f"Wczytano {len(self.df_reviews)} recenzji")
+            print(f"Reviews: {len(self.df_reviews)}")
 
            
             if self.df_business is None:
                 self.df_business = self.load_business()
-                print(f"Wczytano {len(self.df_business)} biznesów")
+                print(f"Businesses: {len(self.df_business)}")
 
             self.df_merged = self.merge_reviews_with_business()
-            print(f"Po scaleniu: {len(self.df_merged)} rekordów")
+            print(f"Records: {len(self.df_merged)}")
 
             A_part = self.filter_by_category(CATEGORY_A)
             B_part = self.filter_by_category(CATEGORY_B)
@@ -248,12 +226,10 @@ class YelpDataPreparer:
             collected_A.extend(A_part.to_dict("records"))
             collected_B.extend(B_part.to_dict("records"))
 
-            print(f"Zebrano A: {len(collected_A)}, B: {len(collected_B)}")
+            print(f"A: {len(collected_A)}, B: {len(collected_B)}")
 
             if len(collected_A) >= dataset_size and len(collected_B) >= dataset_size:
                 break
-
-        print("\n=== Kompletowanie sudden drift stream... ===")
 
         final_A = collected_A[:dataset_size]
         final_B = collected_B[:dataset_size]
@@ -265,42 +241,39 @@ class YelpDataPreparer:
             for rec in final_B:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        print(f"\nZapisano sudden drift dataset → {output_path}")
-        print(f"Rozmiar: {len(final_A)} A + {len(final_B)} B = {len(final_A) + len(final_B)} rekordów")
+        print(f"\nOutput path: {output_path}")
+        print(f"Records total: {len(final_A)} A + {len(final_B)} B = {len(final_A) + len(final_B)}")
 
     def create_sudden_drift_data_by_year(self, year_a: int, year_b: int, dataset_size=dataset_size, output_path=OUTPUT_PATH):
-        """
-        Tworzy dane typu sudden drift:
-        najpierw dataset_size próbek CATEGORY_A,
-        potem dataset_size próbek CATEGORY_B.
-
-        Dane są zapisywane jako JSONL do output_path.
-        """
+        #Tworzy dane typu sudden drift:
+        #najpierw dataset_size próbek CATEGORY_A,
+        #potem dataset_size próbek CATEGORY_B.
+        #Dane są zapisywane jako JSONL do output_path.
 
         collected_A = []
         collected_B = []
 
         batch_size = 100_000  # ile linii wczytywać per batch
 
-        print("=== Tworzenie sudden drift dataset ===")
+        print("Sudden drift by year dataset")
 
         while self.file_index < 30_000_000:
 
-            print(f"\nWczytywanie batchu od {self.file_index} do {self.file_index + batch_size}")
+            print(f"\nBatch {self.file_index} - {self.file_index + batch_size}")
 
             
             self.df_reviews = self.load_reviews(self.file_index, self.file_index + batch_size)
             self.file_index += batch_size
 
-            print(f"Wczytano {len(self.df_reviews)} recenzji")
+            print(f"Reviews {len(self.df_reviews)}")
 
            
             if self.df_business is None:
                 self.df_business = self.load_business()
-                print(f"Wczytano {len(self.df_business)} biznesów")
+                print(f"Businesses {len(self.df_business)}")
 
             self.df_merged = self.merge_reviews_with_business()
-            print(f"Po scaleniu: {len(self.df_merged)} rekordów")
+            print(f"Records: {len(self.df_merged)}")
 
             A_part = self.filter_by_year_and_category(year_a, CATEGORY_A)
             B_part = self.filter_by_year_and_category(year_b, CATEGORY_A)
@@ -320,8 +293,6 @@ class YelpDataPreparer:
             if len(collected_A) >= dataset_size and len(collected_B) >= dataset_size:
                 break
 
-        print("\n=== Kompletowanie sudden drift stream... ===")
-
         final_A = collected_A[:dataset_size]
         final_B = collected_B[:dataset_size]
 
@@ -332,21 +303,19 @@ class YelpDataPreparer:
             for rec in final_B:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        print(f"\nZapisano sudden drift dataset → {output_path}")
-        print(f"Rozmiar: {len(final_A)} A + {len(final_B)} B = {len(final_A) + len(final_B)} rekordów")
+        print(f"\nOutput path: {output_path}")
+        print(f"Records total: {len(final_A)} A + {len(final_B)} B = {len(final_A) + len(final_B)}")
         
     def create_gradual_drift_data(self, dataset_size_per_segment=dataset_size, output_path=OUTPUT_PATH):
-        """
-        Tworzy dane typu gradual drift:
-        segment 1: 100% CATEGORY_A
-        segment 2: 80% A / 20% B
-        segment 3: 60% A / 40% B
-        ...
-        segment N: 0% A / 100% B
+        #Tworzy dane typu gradual drift:
+        #segment 1: 100% CATEGORY_A
+        #segment 2: 80% A / 20% B
+        #segment 3: 60% A / 40% B
+        #...
+        #segment N: 0% A / 100% B
 
-        Każdy segment ma dataset_size_per_segment próbek.
-        Dane są zapisywane jako JSONL do output_path.
-        """
+        #Każdy segment ma dataset_size_per_segment próbek.
+        #Dane są zapisywane jako JSONL do output_path.
 
         collected_A = []
         collected_B = []
@@ -354,7 +323,7 @@ class YelpDataPreparer:
         batch_size = 100_000 
         self.file_index = 0
 
-        print("=== Tworzenie gradual drift dataset ===")
+        print("Gradual drift dataset")
         ratios = [
             (1.0, 0.0),
             (0.8, 0.2),
@@ -367,22 +336,22 @@ class YelpDataPreparer:
         max_A_needed = int(sum(r[0] for r in ratios) * dataset_size_per_segment)
         max_B_needed = int(sum(r[1] for r in ratios) * dataset_size_per_segment)
 
-        print(f"Docelowo potrzebne A: {max_A_needed}, B: {max_B_needed}")
+        print(f"Need A: {max_A_needed}, B: {max_B_needed}")
 
         while self.file_index < 30_000_000:
-            print(f"\nWczytywanie batchu od {self.file_index} do {self.file_index + batch_size}")
+            print(f"\nBatch {self.file_index} - {self.file_index + batch_size}")
 
             self.df_reviews = self.load_reviews(self.file_index, self.file_index + batch_size)
             self.file_index += batch_size
 
-            print(f"Wczytano {len(self.df_reviews)} recenzji")
+            print(f"Reviews: {len(self.df_reviews)}")
 
             if self.df_business is None:
                 self.df_business = self.load_business()
-                print(f"Wczytano {len(self.df_business)} biznesów")
+                print(f"Businesses: {len(self.df_business)}")
 
             self.df_merged = self.merge_reviews_with_business()
-            print(f"Po scaleniu: {len(self.df_merged)} rekordów")
+            print(f"Records total: {len(self.df_merged)}")
 
             A_part = self.filter_by_category(CATEGORY_A)
             B_part = self.filter_by_category(CATEGORY_B)
@@ -398,17 +367,14 @@ class YelpDataPreparer:
             collected_A.extend(A_part.to_dict("records"))
             collected_B.extend(B_part.to_dict("records"))
 
-            print(f"Zebrano A: {len(collected_A)}, B: {len(collected_B)}")
+            print(f"Samples A: {len(collected_A)}, B: {len(collected_B)}")
 
             if len(collected_A) >= max_A_needed and len(collected_B) >= max_B_needed:
-                print("Mamy wystarczająco danych z obu klas.")
                 break
 
         if len(collected_A) < max_A_needed or len(collected_B) < max_B_needed:
-            print("UWAGA: nie udało się zebrać wystarczającej liczby próbek A/B.")
-            print(f"Mamy A={len(collected_A)} / B={len(collected_B)}, potrzebne A={max_A_needed}, B={max_B_needed}")
-
-        print("\n=== Kompletowanie gradual drift stream... ===")
+            print("WARNING: Not enough samples")
+            print(f"A={len(collected_A)} / B={len(collected_B)}, need A={max_A_needed}, B={max_B_needed}")
 
         idx_A = 0
         idx_B = 0
@@ -427,19 +393,19 @@ class YelpDataPreparer:
             segment = seg_A + seg_B
             random.shuffle(segment) 
 
-            print(f"Segment {i}: ratio A={ratio_A}, B={ratio_B} -> A={len(seg_A)}, B={len(seg_B)}, razem={len(segment)}")
+            print(f"Segment {i}: ratio A={ratio_A}, B={ratio_B} -> A={len(seg_A)}, B={len(seg_B)}, total={len(segment)}")
 
             stream.extend(segment)
 
-        print(f"\nŁączna liczba próbek w strumieniu: {len(stream)}")
+        print(f"\nSamples total: {len(stream)}")
 
         with open(output_path, "w", encoding="utf-8") as f:
             for rec in stream:
                 rec = self.make_json_serializable(rec)
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
-        print(f"\nZapisano gradual drift dataset → {output_path}")
-        print(f"Liczba segmentów: {len(ratios)}, rozmiar segmentu: {dataset_size_per_segment}, razem: {len(stream)} rekordów")
+        print(f"\nOutput path: {output_path}")
+        print(f"Segments: {len(ratios)}, segment size: {dataset_size_per_segment}, records total: {len(stream)}")
         
 if __name__ == "__main__":
     args = parse_args()

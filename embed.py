@@ -27,7 +27,7 @@ def parse_args():
         default=OUTPUT_PATH,
         type=str,
         required=True,
-        help="Where to save the output file"
+        help="Path to save the output file"
     )
 
     parser.add_argument(
@@ -35,7 +35,7 @@ def parse_args():
         dest="batch_size",
         type=int,
         default=BATCH_SIZE,
-        help="Batch size for embedding model"
+        help="Batch size for the embedding model"
     )
 
     parser.add_argument(
@@ -49,9 +49,7 @@ def parse_args():
     return parser.parse_args()
 
 def batch_reader(path, batch_size):
-    """
-    Generator zwracający batchy linii z pliku JSONL.
-    """
+    #Generator zwracający batche linii z pliku JSONL.
     batch = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -66,7 +64,7 @@ def batch_reader(path, batch_size):
 
 
 def main():
-    print(f"Ładowanie modelu embeddingowego {MODEL_NAME}...")
+    print(f"Embedding model: {MODEL_NAME}")
     model = SentenceTransformer(MODEL_NAME)
     if os.path.exists(OUTPUT_PATH):
         os.remove(OUTPUT_PATH)
@@ -75,7 +73,7 @@ def main():
 
     total_lines = 0
 
-    print(f"Przetwarzanie pliku: {INPUT_PATH}")
+    print(f"Input file path: {INPUT_PATH}")
     for batch_idx, batch in enumerate(batch_reader(INPUT_PATH, BATCH_SIZE)):
         texts = []
         objs = []
@@ -100,10 +98,10 @@ def main():
             out.write(json.dumps(obj) + "\n")
 
         total_lines += len(batch)
-        print(f"Przetworzono: {total_lines} linii...", end="\r")
+        print(f"Lines processed: {total_lines}", end="\r")
 
     out.close()
-    print(f"\nZapisano embeddingi do: {OUTPUT_PATH}")
+    print(f"\nOutput path: {OUTPUT_PATH}")
 
 
 if __name__ == "__main__":
