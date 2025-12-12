@@ -14,7 +14,7 @@ from sklearn.ensemble import IsolationForest
 
 from sklearn.decomposition import PCA
 
-#IMPORTY FROUROS (STREAMING)
+# IMPORTY FROUROS (STREAMING)
 from frouros.detectors.concept_drift import ADWIN, ADWINConfig
 from frouros.detectors.data_drift.streaming.distance_based import MMD as MMDStreaming
 from frouros.detectors.data_drift.streaming.statistical_test import IncrementalKSTest
@@ -22,15 +22,15 @@ from frouros.detectors.data_drift.streaming.statistical_test import IncrementalK
 FILE_PATH = "./yelp_sudden_embed/yelp_sudden_embed.json"
 ANOMALY_MODEL_NAME = "svm"
 
-MMD_CHECK_INTERVAL = 10  #MMD co 10 recenzji - 10x przyspieszenie
-PCA_COMPONENTS = 32  #Redukcja embeddingu z 384 do 32 wymiarów dla MMD
-STREAM_WINDOW_SIZE = 200  #Mniejsze okno - szybsze MMD
+MMD_CHECK_INTERVAL = 10  # MMD co 10 recenzji - 10x przyspieszenie
+PCA_COMPONENTS = 32  # Redukcja embeddingu z 384 do 32 wymiarów dla MMD
+STREAM_WINDOW_SIZE = 200  # Mniejsze okno - szybsze MMD
 
-WARMUP_TRAIN = 200  #Próbki do trenowania modelu
-WARMUP_REF = 200  #Baza dla KS i MMD
+WARMUP_TRAIN = 200  # Próbki do trenowania modelu
+WARMUP_REF = 200  # Baza dla KS i MMD
 WARMUP_TOTAL = WARMUP_TRAIN + WARMUP_REF
 
-#W streamingu to oznacza: "Porównuj ostatnie 300 próbek strumienia z bazą referencyjną"
+# W streamingu to oznacza: "Porównuj ostatnie 300 próbek strumienia z bazą referencyjną"
 STREAM_WINDOW_SIZE = 300
 ADWIN_DELTA = 0.002
 EMBEDDING_DIM = 384
@@ -61,8 +61,8 @@ def init():
         print(
             "Usage: python nlp_drift_detection.py <path_to_json_file> <anomaly_model>"
         )
-        #sys.exit(1)
-        #return
+        # sys.exit(1)
+        # return
 
     global ANOMALY_MODEL_NAME
     if len(sys.argv) > 2:
@@ -100,29 +100,29 @@ def process_stream(file_path: str):
 
 def main():
     scaler = StandardScaler()
-    #PCA tylko dla MMD (nie wpływa na SVM/ADWIN/KS)
+    # PCA tylko dla MMD (nie wpływa na SVM/ADWIN/KS)
     pca_reducer = PCA(n_components=PCA_COMPONENTS)
 
-    #ADWIN (Concept Drift - Zmiana średniej)
+    # ADWIN (Concept Drift - Zmiana średniej)
     adwin = ADWIN(config=ADWINConfig(delta=ADWIN_DELTA))
 
-    #Incremental KS Test (Data Drift - Zmiana rozkładu wyników 1D)
-    #Porównuje histogram referencyjny z oknem przesuwnym ze strumienia
+    # Incremental KS Test (Data Drift - Zmiana rozkładu wyników 1D)
+    # Porównuje histogram referencyjny z oknem przesuwnym ze strumienia
     ks_stream = IncrementalKSTest(window_size=STREAM_WINDOW_SIZE)
 
-    #Streaming MMD (Data Drift - Zmiana rozkładu embeddingów ND)
-    #Porównuje kernel distance referencji z oknem przesuwnym
+    # Streaming MMD (Data Drift - Zmiana rozkładu embeddingów ND)
+    # Porównuje kernel distance referencji z oknem przesuwnym
     mmd_stream = MMDStreaming(window_size=STREAM_WINDOW_SIZE)
 
-    #Bufory
+    # Bufory
     step = 0
     warmup_buffer = []
     model_trained = False
 
-    #Przechowywanie zredukowanych danych ref
+    # Przechowywanie zredukowanych danych ref
     X_ref_pca = None
 
-    #MODEL BAZOWY
+    # MODEL BAZOWY
     model = None
     if ANOMALY_MODEL_NAME == "svm":
         model = OneClassSVM(nu=0.1, kernel="rbf", gamma="scale")
@@ -131,7 +131,7 @@ def main():
             n_estimators=100,
             contamination=0.1,
             random_state=42,
-            n_jobs=-1,  #Use all cpu cores?
+            n_jobs=-1,  # Use all cpu cores?
         )
     else:
         print(f"ERROR: unknown model - {ANOMALY_MODEL_NAME}")
@@ -146,7 +146,7 @@ def main():
         for embedding, date_str, text in process_stream(str(FILE_PATH)):
             step += 1
 
-            #WARMUP (Zbieranie i Fit)
+            # WARMUP (Zbieranie i Fit)
             if not model_trained:
                 warmup_buffer.append(embedding)
                 if len(warmup_buffer) >= WARMUP_TOTAL:
@@ -156,12 +156,12 @@ def main():
                     X_train = X_all[:WARMUP_TRAIN]
                     X_ref_raw = X_all[WARMUP_TRAIN:]
 
-                    #Training modelu anomalii na pełnych wymiarach
+                    # Training modelu anomalii na pełnych wymiarach
                     scaler.fit(X_train)
                     X_train_scaled = scaler.transform(X_train)
                     model.fit(X_train_scaled)
 
-                    #Reference Scores dla KS
+                    # Reference Scores dla KS
                     X_ref_scaled = scaler.transform(X_ref_raw)
                     if ANOMALY_MODEL_NAME == "svm":
                         raw_s = model.score_samples(X_ref_scaled)
@@ -171,21 +171,21 @@ def main():
                         scores_ref = [sigmoid(-s * 10) for s in raw_s]
                     scores_ref = np.array(scores_ref, dtype=np.float64)
 
-                    #FIT PCA I MMD (Optymalizacja)
-                    #Training PCA na danych referencyjnych
+                    # FIT PCA I MMD (Optymalizacja)
+                    # Training PCA na danych referencyjnych
                     pca_reducer.fit(X_ref_raw)
                     X_ref_pca = pca_reducer.transform(X_ref_raw)
 
-                    #Fit detektorów
+                    # Fit detektorów
                     ks_stream.fit(X=scores_ref)
-                    mmd_stream.fit(X=X_ref_pca)  #MMD training na zredukowanych danych
+                    mmd_stream.fit(X=X_ref_pca)  # MMD training na zredukowanych danych
 
                     model_trained = True
                     warmup_buffer = []
                 continue
 
-            #DETEKCJA ONLINE
-            #Scoring
+            # DETEKCJA ONLINE
+            # Scoring
             X_sample = embedding.reshape(1, -1)
             X_sample_scaled = scaler.transform(X_sample)
 
@@ -196,59 +196,52 @@ def main():
                 raw = model.decision_function(X_sample_scaled)[0]
                 prob = sigmoid(-raw * 10)
 
-            #ADWIN (Concept Drift)
+            # ADWIN (Concept Drift)
             adwin.update(value=prob)
             if adwin.drift:
                 print(f"[ADWIN] Drift in step: {step} (Zmiana średniej anomalii)")
                 print(f"    {text[:60]}...")
                 adwin.reset()
 
-            #Incremental KS (Data Drift 1D)
-            #Monitoruje rozkład wyników modelu (probability)
+            # Incremental KS (Data Drift 1D)
+            # Monitoruje rozkład wyników modelu (probability)
             ks_result, _ = ks_stream.update(value=prob)
-            if (
-                ks_result is not None
-                and ks_result.p_value
-                < 0.001
-            ):
-                #Pobieramy p-value z obiektu testu
-                #Frouros przechowuje statystyki w callbacks lub logs, ale flaga .drift wystarczy
+            if ks_result is not None and ks_result.p_value < 0.001:  # type: ignore
+                # Pobieramy p-value z obiektu testu
+                # Frouros przechowuje statystyki w callbacks lub logs, ale flaga .drift wystarczy
                 print(f"[Inc-KS] Drift in step: {step} (Zmiana rozkładu wyników)")
                 print(f"    {text[:60]}...")
                 ks_stream.reset()
-                ks_stream.fit(
-                    X=scores_ref
-                )
+                ks_stream.fit(X=scores_ref)  # type: ignore
 
-            #Streaming MMD (Data Drift ND)
-            #Monitoruje surowe wektory embeddingów
+            # Streaming MMD (Data Drift ND)
+            # Monitoruje surowe wektory embeddingów
             if step % MMD_CHECK_INTERVAL == 0:
                 try:
                     emb_pca = pca_reducer.transform(embedding.reshape(1, -1))
-                    #Flatten do 1D (wymóg niektórych wersji streaming MMD)
+                    # Flatten do 1D (wymóg niektórych wersji streaming MMD)
                     emb_pca_flat = emb_pca.flatten()
                     mmd_result, _ = mmd_stream.update(
-                        value=emb_pca_flat
+                        value=emb_pca_flat  # type: ignore
                     )
 
                     if (
                         mmd_result is not None
-                        and mmd_result.distance
-                        > 0.025
+                        and mmd_result.distance > 0.025  # type: ignore
                     ):
-                        print(f"[MMD] Drift in step: {step} (Zmiana geometrii embeddingów)")
+                        print(
+                            f"[MMD] Drift in step: {step} (Zmiana geometrii embeddingów)"
+                        )
                         print(f"    {text[:60]}...")
                         mmd_stream.reset()
-                        #MUSIMY UŻYĆ X_ref_pca (32 dim), NIE X_ref_raw (384 dim)
-                        mmd_stream.fit(
-                            X=X_ref_pca
-                        )
+                        # MUSIMY UŻYĆ X_ref_pca (32 dim), NIE X_ref_raw (384 dim)
+                        mmd_stream.fit(X=X_ref_pca)  # type: ignore
                 except Exception as e:
-                    #Zabezpieczenie przed błędami algebry liniowej w update
+                    # Zabezpieczenie przed błędami algebry liniowej w update
                     print(f"MMD ERROR: {e}")
                     pass
 
-            #Logs
+            # Logs
             if step % 1000 == 0:
                 print(f"Step {step} | {date_str} | Probability: {prob:.2f}")
 
@@ -258,7 +251,7 @@ def main():
         traceback.print_exc()
 
 
-#Usage: python nlp_drift_detection.py <parth_to_json_file> <anomaly_model>
+# Usage: python nlp_drift_detection.py <parth_to_json_file> <anomaly_model>
 if __name__ == "__main__":
     init()
     main()
