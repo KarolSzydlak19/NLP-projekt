@@ -2,10 +2,10 @@ import json
 from sentence_transformers import SentenceTransformer
 import os
 import argparse
-import sys
 
-INPUT_PATH = "" 
-OUTPUT_PATH = ""   
+# Domyślne wartości (zostaną nadpisane przez argumenty)
+INPUT_PATH = "D:\\nlp\\datasets\\sudden" 
+OUTPUT_PATH = "D:\\nlp\\datasets\\embed\\sudden"   
 BATCH_SIZE = 256                         
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -17,8 +17,8 @@ def parse_args():
         dest="input_path",
         default=INPUT_PATH,
         type=str,
-        required=True,
-        help="Path to the input dataset file"
+        required=False,
+        help="Path to the input dataset file or directory"
     )
 
     parser.add_argument(
@@ -26,8 +26,8 @@ def parse_args():
         dest="output_path",
         default=OUTPUT_PATH,
         type=str,
-        required=True,
-        help="Path to save the output file"
+        required=False,
+        help="Path to save the output file or directory"
     )
 
     parser.add_argument(
@@ -49,7 +49,7 @@ def parse_args():
     return parser.parse_args()
 
 def batch_reader(path, batch_size):
-    #Generator zwracający batche linii z pliku JSONL.
+    """Generator zwracający batche linii z pliku JSONL."""
     batch = []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -62,19 +62,23 @@ def batch_reader(path, batch_size):
         if batch:
             yield batch
 
+def process_file(model, input_file, output_file, batch_size):
+    """Funkcja przetwarzająca jeden konkretny plik."""
+    output_file = input_file + "_embedded.jsonl"
+    
+    # Jeśli plik wyjściowy istnieje, usuń go przed zapisem
+    if os.path.exists(output_file):
+        os.remove(output_file)
 
-def main():
-    print(f"Embedding model: {MODEL_NAME}")
-    model = SentenceTransformer(MODEL_NAME)
-    if os.path.exists(OUTPUT_PATH):
-        os.remove(OUTPUT_PATH)
+    # Upewnij się, że katalog dla pliku wyjściowego istnieje
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    out = open(OUTPUT_PATH, "w", encoding="utf-8")
-
+    print(f"Processing: {input_file} -> {output_file}")
+    
+    out = open(output_file, "w", encoding="utf-8")
     total_lines = 0
 
-    print(f"Input file path: {INPUT_PATH}")
-    for batch_idx, batch in enumerate(batch_reader(INPUT_PATH, BATCH_SIZE)):
+    for batch_idx, batch in enumerate(batch_reader(input_file, batch_size)):
         texts = []
         objs = []
         for line in batch:
@@ -83,12 +87,17 @@ def main():
             except json.JSONDecodeError:
                 continue
 
-            objs.append(obj)
-            texts.append(obj["text"])
+            # Zakładamy, że pole tekstowe nazywa się "text"
+            if "text" in obj:
+                objs.append(obj)
+                texts.append(obj["text"])
+
+        if not texts:
+            continue
 
         embeddings = model.encode(
             texts,
-            batch_size=64,
+            batch_size=64, # Batch size wewnętrzny modelu (nie musi być taki sam jak batch czytania)
             convert_to_numpy=True,
             show_progress_bar=False
         )
@@ -98,16 +107,47 @@ def main():
             out.write(json.dumps(obj) + "\n")
 
         total_lines += len(batch)
-        print(f"Lines processed: {total_lines}", end="\r")
-
+        print(f"   Lines processed: {total_lines}", end="\r")
+    
     out.close()
-    print(f"\nOutput path: {OUTPUT_PATH}")
+    print(f"\n   Finished file: {output_file}")
 
+def main():
+    print(f"Loading embedding model: {MODEL_NAME}")
+    model = SentenceTransformer(MODEL_NAME)
+
+    # Sprawdzamy czy INPUT_PATH to katalog czy plik
+    if os.path.isdir(INPUT_PATH):
+        print(f"Input is a directory: {INPUT_PATH}")
+        
+        # Jeśli input to katalog, output też traktujemy jako katalog
+        if not os.path.exists(OUTPUT_PATH):
+            os.makedirs(OUTPUT_PATH)
+
+        # Pobieramy listę plików w katalogu
+        files = [f for f in os.listdir(INPUT_PATH) if os.path.isfile(os.path.join(INPUT_PATH, f))]
+        
+        for filename in files:
+            # Pomiń pliki systemowe lub ukryte (opcjonalnie)
+            if filename.startswith("."):
+                continue
+                
+            full_input_path = os.path.join(INPUT_PATH, filename)
+            full_output_path = os.path.join(OUTPUT_PATH, filename)
+            
+            process_file(model, full_input_path, full_output_path, BATCH_SIZE)
+
+    else:
+        # Tryb pojedynczego pliku (stare zachowanie)
+        print(f"Input is a single file: {INPUT_PATH}")
+        process_file(model, INPUT_PATH, OUTPUT_PATH, BATCH_SIZE)
 
 if __name__ == "__main__":
     args = parse_args()
+    
     INPUT_PATH = args.input_path
     OUTPUT_PATH = args.output_path
     BATCH_SIZE = args.batch_size
     MODEL_NAME = args.model_name
+    
     main()
