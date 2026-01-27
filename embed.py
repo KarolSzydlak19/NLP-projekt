@@ -4,8 +4,8 @@ import os
 import argparse
 
 # Domyślne wartości (zostaną nadpisane przez argumenty)
-INPUT_PATH = "D:\\nlp\\datasets\\sudden" 
-OUTPUT_PATH = "D:\\nlp\\datasets\\embed\\sudden"   
+INPUT_PATH = "../../nlp-datasets/datasets/sudden_by_year" 
+OUTPUT_PATH = "../../nlp-datasets/datasets/sudden_by_year/gte/"   
 BATCH_SIZE = 256                         
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
@@ -64,7 +64,7 @@ def batch_reader(path, batch_size):
 
 def process_file(model, input_file, output_file, batch_size):
     """Funkcja przetwarzająca jeden konkretny plik."""
-    output_file = input_file + "_embedded.jsonl"
+    output_file = output_file + "_embedded.jsonl"
     
     # Jeśli plik wyjściowy istnieje, usuń go przed zapisem
     if os.path.exists(output_file):
@@ -149,5 +149,4 @@ if __name__ == "__main__":
     OUTPUT_PATH = args.output_path
     BATCH_SIZE = args.batch_size
     MODEL_NAME = args.model_name
-    
     main()

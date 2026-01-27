@@ -5,13 +5,13 @@ import tempfile
 import pandas as pd
 import random
 
-INPUT_PATH = "D:\\nlp\\data\\yelp_academic_dataset_review_sorted.json"
-BUSINESS_PATH = "D:\\nlp\\data\\yelp_academic_dataset_business.json"
-OUTPUT_PATH = "D:\\nlp\\datasets\\sudden_by_year\\sudden_by_year_drift"  
+INPUT_PATH = "../../nlp-datasets/yelp_dataset/yelp_academic_dataset_review.json" 
+BUSINESS_PATH = "../../nlp-datasets/yelp_dataset/yelp_academic_dataset_business.json"
+OUTPUT_PATH = "../../nlp-datasets/datasets/gradual/"  
 CATEGORY_A = "Restaurants"
 CATEGORY_B = "Beauty & Spas"
-DATASET_SIZE = 1000
-DRIFT_TYPE = "sudden_by_year"  #sudden, gradual or sudden_by_year
+DATASET_SIZE = 2000
+DRIFT_TYPE = "gradual"  #sudden, gradual or sudden_by_year
 
 import argparse
 
@@ -448,5 +448,6 @@ if __name__ == "__main__":
             yd.create_sudden_drift_data_by_year(output_path=current_output, year_a=2010, year_b= 2021)
             current_output = current_output[:-6] + str(i+1) + ".json"
     elif DRIFT_TYPE == "gradual":
-        yd.create_gradual_drift_data(output_path=current_output)
-            
+        for i in range(10):
+            yd.create_gradual_drift_data(output_path=current_output)
+            current_output = current_output[:-6] + str(i+1) + ".json"
