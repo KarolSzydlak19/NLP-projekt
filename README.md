@@ -47,11 +47,11 @@ python embed.py \
   --m "sentence-transformers/all-MiniLM-L6-v2"
 ```
 
-## Detekcja dryfu (główny skrypt)
+## Detekcja dryfu
 
 ```bash
 python data_drift_detection.py \
-  --file "./data/sudden_drift_embedded.jsonl" \
+  --file "./data/sudden/bert/_0.json_embedded.jsonl" \
   --batch_size 100 \
   --ref_size 1000 \
   --alpha 0.05 \
@@ -100,8 +100,6 @@ python test_model.py
 ```
 ./data/               # dane wejściowe
 ./results/           # wyniki CSV
-./bert_grad/         # wyniki dla BERT sudden
-./gte/gradual/       # wyniki dla GTE gradual
 ```
 
 ## Przykład uruchomienia
@@ -114,7 +112,7 @@ python prepare_balanced_dataset.py --ip review.json --bp business.json --op data
 python embed.py --ip data.jsonl --op data_embedded.jsonl
 
 # 3. Uruchom detekcję dryfu
-python data_drift_detection.py --file data_embedded.jsonl --out_csv results.csv
+python data_drift_detection.py --file ./data/sudden/bert/_0.json_embedded.jsonl --out_csv results.csv
 
 # 4. Analizuj wyniki
 python plot_mean.py
