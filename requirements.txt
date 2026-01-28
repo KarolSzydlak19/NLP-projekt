@@ -1,0 +1,6 @@
+pandas
+numpy
+scikit-learn
+frouros
+sentence_transformers
+alibi_detect
