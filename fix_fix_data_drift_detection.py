@@ -1,18 +1,3 @@
-"""
-Detekcja dryfu danych w embeddingach wysokowymiarowych.
-
-Metodologia inspirowana:
-- Rabanser et al. (2019) "Failing Loudly: An Empirical Study of Methods for Detecting Dataset Shift"
-- Gretton et al. (2012) "A Kernel Two-Sample Test"
-- Liu & Xie (2020) "Cauchy Combination Test" (ACAT) jako meta-test odporny na zależności p-value.
-
-UWAGI:
-- Bez normalizacji embeddingów.
-- LSDDDrift: p-value dostępne przy predict(..., return_p_val=True).
-- Frouros KSTest.compare może zwracać ndarray ze StatisticalResult pod indeksem [0].
-- STOP rule jest sekwencyjny -> dodano `patience` i `test_every` dla redukcji false stopów.
-"""
-
 import sys
 import json
 import math
@@ -20,16 +5,12 @@ import argparse
 import csv
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-
 import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.decomposition import PCA
-
-# --- Alibi Detect ---
 from alibi_detect.cd import LSDDDrift
 
-# --- Frouros (różne wersje mogą mieć inne ścieżki importu) ---
 try:
     from frouros.detectors.data_drift import MMD, KSTest
 except Exception:
@@ -38,24 +19,22 @@ except Exception:
 from frouros.callbacks.batch import PermutationTestDistanceBased
 
 try:
-    from scipy.stats import combine_pvalues  # tylko jeśli wybierzesz --meta fisher
+    from scipy.stats import combine_pvalues
 
     _HAS_SCIPY = True
 except Exception:
     _HAS_SCIPY = False
 
 
-# =============================================================================
-# KONFIG DOMYŚLNY
-# =============================================================================
+# DEFAULT CONFIGURATION
 
-DEFAULT_FILE_PATH = "./nlp/gradual/bert/bert/_0.json_embedded.jsonl"
-DEFAULT_BATCH_SIZE = 500
+DEFAULT_FILE_PATH = "./nlp/gradual/bert/bert/_8.json_embedded.jsonl"
+DEFAULT_BATCH_SIZE = 50
 DEFAULT_REF_SIZE = 1000
 
 ALPHA_GLOBAL = 0.05
-N_DETECTORS = 3  # LSDD, BBSD(KS), UAE(MMD)
-ALPHA_PER_TEST = ALPHA_GLOBAL / N_DETECTORS  # konserwatywnie
+N_DETECTORS = 3  # LSDD, MKS, UAE(MMD)
+ALPHA_PER_TEST = ALPHA_GLOBAL / N_DETECTORS
 
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
@@ -68,9 +47,7 @@ N_PCA_COMPONENTS = 32
 UAE_LATENT_DIM = 64
 
 
-# =============================================================================
-# UAE (Untrained AutoEncoder) = losowa projekcja przez zamrożony MLP
-# =============================================================================
+# UAE (Untrained AutoEncoder)
 
 
 class UAE(nn.Module):
@@ -89,9 +66,7 @@ class UAE(nn.Module):
         return self.encoder(x)
 
 
-# =============================================================================
 # META-TEST: ACAT (Cauchy Combination Test)
-# =============================================================================
 
 
 def combine_pvalues_acat(
@@ -99,7 +74,6 @@ def combine_pvalues_acat(
 ) -> float:
     """
     ACAT: Aggregated Cauchy Association Test / Cauchy Combination Test.
-    p = 0.5 - arctan(T)/pi, gdzie T = sum_i w_i * tan((0.5 - p_i)*pi)
     """
     if not p_values:
         return 1.0
@@ -121,9 +95,7 @@ def combine_pvalues_acat(
     return float(min(max(p_comb, 0.0), 1.0))
 
 
-# =============================================================================
-# DETEKTOR
-# =============================================================================
+# DETECTOR CLASS
 
 
 @dataclass
@@ -135,7 +107,7 @@ class DetectorConfig:
     n_perm_lsdd: int = N_PERMUTATIONS_LSDD
     n_perm_mmd: int = N_PERMUTATIONS_MMD
     random_seed: int = RANDOM_SEED
-    meta_method: str = "acat"  # "acat" lub "fisher"
+    meta_method: str = "acat"  # "acat" or "fisher"
 
 
 class ScientificDriftDetector:
@@ -149,24 +121,23 @@ class ScientificDriftDetector:
 
         n_samples, n_features = x_ref.shape
 
-        # Bezpieczny dobór liczby komponentów PCA (>=1, <=n_features, <=n_samples-1)
         max_components = max(
             1, min(cfg.n_pca_components, n_features, max(1, n_samples - 1))
         )
         self.n_pca_components = max_components
 
-        # Bonferroni wewnątrz BBSD (po komponentach)
+        # Bonferroni correction (per component)
         self.alpha_bonferroni = self.alpha_per_test / self.n_pca_components
 
         print("\n" + "=" * 70)
         print("INICJALIZACJA DETEKTORA DRYFU")
         print("=" * 70)
-        print(f"  Referencja: {n_samples} próbek")
+        print(f"  Referencja: {n_samples} probek")
         print(f"  Wymiar: {n_features}")
-        print(f"  α globalne (meta): {self.alpha_global}")
-        print(f"  α per detektor:   {self.alpha_per_test:.6f}")
+        print(f"  alfa globalne (meta): {self.alpha_global}")
+        print(f"  alfa per detektor:   {self.alpha_per_test:.6f}")
         print(f"  PCA components:   {self.n_pca_components}")
-        print(f"  α Bonferroni BBSD:{self.alpha_bonferroni:.8f}")
+        print(f"  alfa Bonferroni BBSD:{self.alpha_bonferroni:.8f}")
         print(f"  Meta method:      {cfg.meta_method}")
         print(f"  Device:           {self.device}")
         print("=" * 70)
@@ -175,7 +146,7 @@ class ScientificDriftDetector:
         self._init_pca_ks(x_ref)
         self._init_uae_mmd(x_ref)
 
-        print("\n[✓] Inicjalizacja zakończona.\n")
+        print("\nnicjalizacja zakończona.\n")
 
     def _init_lsdd(self, x_ref: np.ndarray) -> None:
         print(" -> [1/3] LSDD (Alibi Detect)")
@@ -187,7 +158,7 @@ class ScientificDriftDetector:
         )
 
     def _init_pca_ks(self, x_ref: np.ndarray) -> None:
-        print(" -> [2/3] PCA + KS (BBSD)")
+        print(" -> [2/3] PCA + MKS (Bonferroni)")
 
         self.pca = PCA(
             n_components=self.n_pca_components, random_state=self.random_seed
@@ -196,7 +167,7 @@ class ScientificDriftDetector:
 
         explained = float(np.sum(self.pca.explained_variance_ratio_) * 100.0)
         print(
-            f"    PCA: {self.n_pca_components} składowych, wyjaśnia {explained:.1f}% wariancji"
+            f"    PCA: {self.n_pca_components} składowych, {explained:.1f}% wariancji"
         )
 
         self.ks_detectors: List[KSTest] = []
@@ -206,7 +177,7 @@ class ScientificDriftDetector:
             self.ks_detectors.append(det)
 
     def _init_uae_mmd(self, x_ref: np.ndarray) -> None:
-        print(" -> [3/3] UAE + MMD (Frouros)")
+        print(" -> [3/3] UAE + MMD")
 
         self.uae = UAE(
             input_dim=x_ref.shape[1],
@@ -235,7 +206,7 @@ class ScientificDriftDetector:
         results: Dict[str, Dict] = {}
         p_values_for_meta: List[float] = []
 
-        # 1) LSDD
+        # LSDD
         p_lsdd = self._run_lsdd(x_batch)
         results["LSDD"] = {
             "drift": p_lsdd < self.alpha_per_test,
@@ -244,13 +215,13 @@ class ScientificDriftDetector:
         }
         p_values_for_meta.append(p_lsdd)
 
-        # 2) BBSD: PCA + KS + Bonferroni
+        # PCA + KS + Bonferroni
         bbsd = self._run_pca_ks_bonferroni(x_batch)
         results["BBSD_KS"] = bbsd
-        # Konserwatywnie: do meta bierzemy p po Bonferronim
+        # do meta bierzemy p po Bonferronim
         p_values_for_meta.append(bbsd["p_val_corrected"])
 
-        # 3) UAE + MMD
+        # UAE + MMD
         p_mmd = self._run_uae_mmd(x_batch)
         results["UAE_MMD"] = {
             "drift": p_mmd < self.alpha_per_test,
@@ -259,21 +230,21 @@ class ScientificDriftDetector:
         }
         p_values_for_meta.append(p_mmd)
 
-        # 4) Meta
+        # Meta test
         method = self.cfg.meta_method.lower().strip()
         if method == "fisher":
             if not _HAS_SCIPY:
                 raise RuntimeError(
                     "Wybrano meta=fisher, ale brak SciPy (combine_pvalues)."
                 )
-            _, combined_p = combine_pvalues(p_values_for_meta, method="fisher")
+            _, combined_p = combine_pvalues(p_values_for_meta, method="fisher")  # type: ignore
         else:
             combined_p = combine_pvalues_acat(p_values_for_meta)
 
         results["COMBINED_META"] = {
             "method": method,
-            "drift": float(combined_p) < self.alpha_global,
-            "p_val": float(combined_p),
+            "drift": float(combined_p) < self.alpha_global,  # type: ignore
+            "p_val": float(combined_p),  # type: ignore
             "threshold": self.alpha_global,
             "individual_p_values": p_values_for_meta.copy(),
         }
@@ -292,7 +263,7 @@ class ScientificDriftDetector:
     def _run_lsdd(self, x_batch: np.ndarray) -> float:
         try:
             res = self.lsdd.predict(x_batch, return_p_val=True)
-            p = res["data"].get("p_val", 1.0)
+            p = res["data"].get("p_val", 1.0)  # type: ignore
             return float(np.asarray(p).reshape(-1)[0])
         except Exception as e:
             print(f"    [WARN] LSDD error: {e}")
@@ -333,16 +304,11 @@ class ScientificDriftDetector:
             return 1.0
 
 
-# =============================================================================
-# IO: JSONL w batchach (auto-wykrywanie wymiaru embeddingu) + filtr NaN/Inf
-# =============================================================================
-
-
 def read_json_in_batches(
     file_path: str,
     batch_size: int,
     embedding_dim: Optional[int] = None,
-) -> Tuple[np.ndarray, List[Dict]]:
+) -> Tuple[np.ndarray, List[Dict]]:  # type: ignore
     current_emb: List[np.ndarray] = []
     current_meta: List[Dict] = []
 
@@ -373,16 +339,11 @@ def read_json_in_batches(
             current_meta.append({"date": data.get("date", "N/A"), "line_num": line_num})
 
             if len(current_emb) == batch_size:
-                yield np.vstack(current_emb).astype(np.float32), current_meta
+                yield np.vstack(current_emb).astype(np.float32), current_meta  # type: ignore
                 current_emb, current_meta = [], []
 
     if current_emb:
-        yield np.vstack(current_emb).astype(np.float32), current_meta
-
-
-# =============================================================================
-# PRINTY
-# =============================================================================
+        yield np.vstack(current_emb).astype(np.float32), current_meta  # type: ignore
 
 
 def format_p_value(p: float) -> str:
@@ -407,7 +368,7 @@ def print_batch_header(batch_num: int, meta: List[Dict], tested: bool) -> None:
 def print_test_row(
     name: str, drift: bool, p: float, alpha: float, extra: str = ""
 ) -> None:
-    status = "🔴 DRIFT" if drift else "🟢 OK   "
+    status = "  DRIFT" if drift else "  OK   "
     mark = " <-- !" if drift else ""
     print(
         f"   | {name:<12} | {status} | p={format_p_value(p):<10} | α={alpha:.6f}{mark} {extra}"
@@ -442,10 +403,6 @@ def print_results(results: Dict) -> None:
     )
     print("   └──────────────────────────────────────────────────────────────────┘")
 
-
-# =============================================================================
-# CSV LOGGING
-# =============================================================================
 
 CSV_HEADER = [
     "batch_num",
@@ -482,11 +439,6 @@ def append_csv(path: str, row: Dict) -> None:
     with open(path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([row.get(k, "") for k in CSV_HEADER])
-
-
-# =============================================================================
-# MAIN + STOPPING RULE
-# =============================================================================
 
 
 def main():
@@ -543,14 +495,14 @@ def main():
         args.file, args.batch_size, embedding_dim=args.embedding_dim
     )
 
-    # Zbierz referencję
+    # referencje
     print("\n[FAZA 1] Buduję referencję...")
     ref_emb: List[np.ndarray] = []
     ref_meta: List[Dict] = []
 
     try:
         while len(ref_emb) < args.ref_size:
-            X, meta = next(gen)
+            X, meta = next(gen)  # type: ignore
             ref_emb.extend(list(X))
             ref_meta.extend(meta)
             print(f"  Zebrano: {len(ref_emb)}/{args.ref_size}")
@@ -596,13 +548,13 @@ def main():
         }
 
         if not tested:
-            print_batch_header(batch_num, meta, tested=False)
+            print_batch_header(batch_num, meta, tested=False)  # type: ignore
             append_csv(args.out_csv, row_base)
             continue
 
-        results = detector.detect(X_batch)
+        results = detector.detect(X_batch)  # type: ignore
 
-        print_batch_header(batch_num, meta, tested=True)
+        print_batch_header(batch_num, meta, tested=True)  # type: ignore
         print_results(results)
 
         # update streak
