@@ -28,8 +28,8 @@ except Exception:
 
 # DEFAULT CONFIGURATION
 
-DEFAULT_FILE_PATH = "./nlp/gradual/bert/bert/_8.json_embedded.jsonl"
-DEFAULT_BATCH_SIZE = 50
+DEFAULT_FILE_PATH = "./data/sudden/bert/_0.json_embedded.jsonl"
+DEFAULT_BATCH_SIZE = 100
 DEFAULT_REF_SIZE = 1000
 
 ALPHA_GLOBAL = 0.05
@@ -72,9 +72,6 @@ class UAE(nn.Module):
 def combine_pvalues_acat(
     p_values: List[float], weights: Optional[List[float]] = None
 ) -> float:
-    """
-    ACAT: Aggregated Cauchy Association Test / Cauchy Combination Test.
-    """
     if not p_values:
         return 1.0
     m = len(p_values)
@@ -218,7 +215,6 @@ class ScientificDriftDetector:
         # PCA + KS + Bonferroni
         bbsd = self._run_pca_ks_bonferroni(x_batch)
         results["BBSD_KS"] = bbsd
-        # do meta bierzemy p po Bonferronim
         p_values_for_meta.append(bbsd["p_val_corrected"])
 
         # UAE + MMD
@@ -371,14 +367,14 @@ def print_test_row(
     status = "  DRIFT" if drift else "  OK   "
     mark = " <-- !" if drift else ""
     print(
-        f"   | {name:<12} | {status} | p={format_p_value(p):<10} | α={alpha:.6f}{mark} {extra}"
+        f"   | {name:<12} | {status} | p={format_p_value(p):<10} | alpha={alpha:.6f}{mark} {extra}"
     )
 
 
 def print_results(results: Dict) -> None:
-    print("   ┌──────────────────────────────────────────────────────────────────┐")
-    print("   │                           WYNIKI                                  │")
-    print("   ├──────────────┬──────────┬────────────┬────────────────────────────┤")
+    print("   =====================================================================")
+    print("                               WYNIKI                                   ")
+    print("   =====================================================================")
 
     lsdd = results["LSDD"]
     print_test_row("LSDD", lsdd["drift"], lsdd["p_val"], lsdd["threshold"])
@@ -397,11 +393,11 @@ def print_results(results: Dict) -> None:
     print_test_row("UAE_MMD", mmd["drift"], mmd["p_val"], mmd["threshold"])
 
     meta = results["COMBINED_META"]
-    print("   ├──────────────┴──────────┴────────────┴────────────────────────────┤")
+    print("   =====================================================================")
     print_test_row(
         f"META({meta['method']})", meta["drift"], meta["p_val"], meta["threshold"]
     )
-    print("   └──────────────────────────────────────────────────────────────────┘")
+    print("   =====================================================================")
 
 
 CSV_HEADER = [
@@ -464,7 +460,7 @@ def main():
     parser.add_argument(
         "--out_csv",
         type=str,
-        default="drift_results.csv",
+        default="./results/drift_results.csv",
         help="Ścieżka do pliku CSV z logiem wyników.",
     )
     args = parser.parse_args()
@@ -523,7 +519,7 @@ def main():
     )
     detector = ScientificDriftDetector(X_ref, cfg)
 
-    # Analiza streamu
+    # stream analysis
     print("\n[FAZA 2] Analiza strumienia...")
     batch_num = 0
     meta_hits_in_row = 0
@@ -557,7 +553,7 @@ def main():
         print_batch_header(batch_num, meta, tested=True)  # type: ignore
         print_results(results)
 
-        # update streak
+        # update patience counter
         if results["COMBINED_META"]["drift"]:
             meta_hits_in_row += 1
         else:
@@ -567,7 +563,6 @@ def main():
         if stop_now:
             stopped = True
 
-        # log row
         lsdd = results["LSDD"]
         bbsd = results["BBSD_KS"]
         mmd = results["UAE_MMD"]
@@ -596,12 +591,12 @@ def main():
 
         if stop_now:
             print("\n" + "=" * 72)
-            print("⛔ STOP: Meta-test wykrył dryf (spełniona reguła zatrzymania).")
+            print("  STOP: Meta-test wykrył dryf (spełniona reguła zatrzymania).")
             print(f"   Batch: {batch_num}")
             print(f"   Linia końcowa: {end_line}")
             print(f"   Data: {end_date}")
             print(
-                f"   Meta p-value: {format_p_value(meta_res['p_val'])}  (α={meta_res['threshold']})"
+                f"   Meta p-value: {format_p_value(meta_res['p_val'])}  (alpha={meta_res['threshold']})"
             )
             print(
                 f"   Streak (meta): {meta_hits_in_row}/{patience} (test_every={test_every})"
